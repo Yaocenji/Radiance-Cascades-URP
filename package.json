@@ -4,7 +4,7 @@
   "displayName": "Radiance Cascades 2D",
   "description": "A custom 2D Radiance Cascades rendering pipeline implementation for Unity URP.",
   "unity": "2022.3",
-  "documentationUrl": "https://github.com/yourname/radiance-cascades-repo",
+  "documentationUrl": "https://github.com/Yaocenji/Radiance-Cascades-URP.git",
   "keywords": [
     "urp",
     "2d",
