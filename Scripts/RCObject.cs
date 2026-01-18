@@ -1,4 +1,7 @@
 using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 [ExecuteAlways]
 [RequireComponent(typeof(Renderer))]
@@ -186,4 +189,38 @@ public class RCObject : MonoBehaviour
             }
         }
     }
+
+    // --- 添加到菜单 ---
+    #if UNITY_EDITOR
+    // RC_Object.mat 的 GUID（从 .meta 文件中获取）
+    private static readonly string DefaultMaterialGUID = "ee5f934945b7e9c4b97d0c558b96f56d";
+    private static Material _cachedDefaultMaterial;
+
+    [MenuItem("GameObject/2D Object/RC Object (Sprite)", false, 10)]
+    static void CreateRCObject(MenuCommand menuCommand)
+    {
+        GameObject go = new GameObject("RC Object");
+        SpriteRenderer spriteRenderer = go.AddComponent<SpriteRenderer>();
+        go.AddComponent<RCObject>();
+        
+        // 加载并设置默认材质
+        if (_cachedDefaultMaterial == null)
+        {
+            string assetPath = AssetDatabase.GUIDToAssetPath(DefaultMaterialGUID);
+            if (!string.IsNullOrEmpty(assetPath))
+            {
+                _cachedDefaultMaterial = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
+            }
+        }
+        
+        if (_cachedDefaultMaterial != null)
+        {
+            spriteRenderer.material = _cachedDefaultMaterial;
+        }
+        
+        GameObjectUtility.SetParentAndAlign(go, menuCommand.context as GameObject);
+        Undo.RegisterCreatedObjectUndo(go, "Create RC Object");
+        Selection.activeObject = go;
+    }
+    #endif
 }
