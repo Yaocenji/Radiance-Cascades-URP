@@ -21,6 +21,7 @@
             Name "SDFPass"
 
             HLSLPROGRAM
+            #pragma multi_compile _ RC_USE_WORLD_SPACE_SDF_AS_BOTTOM_LAYER
             #pragma vertex Vert
             #pragma fragment Frag
 
@@ -35,6 +36,10 @@
 
             // 我们需要原始的 Occlusion 图来判断正负
             TEXTURE2D(_LightSrc_Occlusion); 
+
+            #if RC_USE_WORLD_SPACE_SDF_AS_BOTTOM_LAYER
+            TEXTURE2D(_SDF_World);
+            #endif
 
             CBUFFER_START(UnityPerMaterial)
             float _StepSize;
@@ -59,6 +64,23 @@
 
                 // 小技巧：SDF + 1，让occ内缩一点，可以避免光源自遮挡
                 sdf += 1;
+
+                // 如果是计算屏幕空间SDF，需要用世界空间SDF来做最小值
+                #if RC_USE_WORLD_SPACE_SDF_AS_BOTTOM_LAYER
+                // 如果是墙，那么不要这个最小值，因为精度可能会有问题
+                if (!(isWall > _Tolerance))
+                {
+                    // 计算采样的UV
+                    float2 uvWorld = (IN.texcoord - .5f) / 4.0f + .5f;
+                    float sdfWorld = SAMPLE_TEXTURE2D(_SDF_World, sampler_LinearClamp, uvWorld).r;
+                    if (sdfWorld > 0)
+                    {
+                        // 因为世界空间SDF是屏幕空间SDF的4倍，所以需要乘4，因为世界空间一个像素相当于四个屏幕空间像素的距离
+                        sdfWorld *= 4.0f;
+                        sdf = min(sdf, sdfWorld);
+                    }
+                }
+                #endif
                 
                 return sdf;
             }

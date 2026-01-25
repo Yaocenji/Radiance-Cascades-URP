@@ -38,6 +38,9 @@
             TEXTURE2D(_SDF);
             TEXTURE2D(_LightSrc_Occlusion);
 
+            TEXTURE2D(_SDF_World);
+            TEXTURE2D(_LightSrc_Occlusion_World);
+
             CBUFFER_START(UnityPerMaterial)
             float _StepSize;
             float2 _RC_Param;
@@ -102,11 +105,22 @@
                 {
                     float2 currentPosition = rayOrigin + t * rayDirection * texelSize;
 
-                    if (t > rayRange.y || currentPosition.x < 0 || currentPosition.y < 0 || currentPosition.x > 1 || currentPosition.y > 1)
+                    if (t > rayRange.y /* || currentPosition.x < 0 || currentPosition.y < 0 || currentPosition.x > 1 || currentPosition.y > 1*/)
                     {
                         break;
                     }
-                    float sdf = SAMPLE_TEXTURE2D(_SDF, sampler_LinearRepeat, currentPosition).r;
+
+                    // 选择合适的图来采样SDF信息
+                    // 判断是否超出屏幕
+                    bool beyoundScreen = currentPosition.x < 0 || currentPosition.y < 0 || currentPosition.x > 1 || currentPosition.y > 1;
+                    // 采样世界空间的UV坐标
+                    // 目前是硬编码：世界空间=屏幕空间放大四倍 
+                    float2 currentPositionWorld = (currentPosition - .5f) / 4.0f + .5f;
+
+                    float sdf = beyoundScreen ? 4.0f * SAMPLE_TEXTURE2D(_SDF_World, sampler_LinearClamp, currentPositionWorld).r : SAMPLE_TEXTURE2D(_SDF, sampler_LinearClamp, currentPosition).r;
+
+                    // debug
+                    //sdf = SAMPLE_TEXTURE2D(_SDF, sampler_LinearClamp, currentPosition).r;
                     
                     // sdf < 0 表示真的撞上了
                     #if RC_USE_VOLUMETRIC_LIGHTING
@@ -114,7 +128,12 @@
                     if (sdf < 0.15)
                     {
                         // 判断此处的厚度
-                        float4 litOcc = float4(SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
+                        float4 litOcc = float4(beyoundScreen ? SAMPLE_TEXTURE2D(_LightSrc_Occlusion_World, sampler_LinearClamp, currentPositionWorld) : SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
+                        
+                        // debug
+                        //litOcc = SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition);
+
+                        // 选择合适的图来采样SDF信息
                         
                         float dist = max(abs(sdf), 1.5);
                         
@@ -157,11 +176,6 @@
                             hit.w *= (1 - litOcc.w) * .8f;
                             t += 3;*/
                         }
-
-                        //t += 1;
-                        
-                        /*hit = float4(SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_PointClamp, currentPosition).rgb, 0);
-                        break;*/
                         
                     }
                     #else
@@ -169,7 +183,7 @@
                     if (sdf < 0.15)
                     {
                         // 撞到物体，直接结束// 判断此处的厚度
-                        float4 litOcc = float4(SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
+                        float4 litOcc = float4(beyoundScreen ? SAMPLE_TEXTURE2D(_LightSrc_Occlusion_World, sampler_LinearClamp, currentPositionWorld) : SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
                         hit.xyz += hit.w * litOcc.rgb * .5f;
                         hit.w = 0;
                         break;
@@ -192,81 +206,6 @@
                 return hit;
             }
 
-
-            //Raymarching
-            float4 SampleRadianceSDFFixed(float2 rayOrigin, float2 rayDirection, float2 rayRange)
-            {
-                float t = rayRange.x + .1f;
-                float4 hit = float4(0, 0, 0, 1);
-
-                float2 texelSize = 1 / _RC_Param;
-                
-                for (int i = 0; i < 32; i++)
-                {
-                    float2 currentPosition = rayOrigin + t * rayDirection * texelSize;
-
-                    if (t > rayRange.y || currentPosition.x < 0 || currentPosition.y < 0 || currentPosition.x > 1 || currentPosition.y > 1)
-                    {
-                        break;
-                    }
-                    float sdf = SAMPLE_TEXTURE2D(_SDF, sampler_LinearRepeat, currentPosition).r;
-                    
-                    // sdf < 0 表示真的撞上了
-                    if (sdf < 0)
-                    {
-                        // 判断此处的厚度
-                        float4 litOcc = float4(SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
-                        
-                        float dist = max(abs(sdf), 1.5);
-                        
-                        if (litOcc.w >= 0.9999)
-                        {
-                            // 撞到坚实物体，直接结束
-                            hit.xyz += hit.w * litOcc.rgb * .5f;
-                            hit.w = 0;
-                            break;
-                        }
-                        else
-                        {
-                            float realDist = min(rayRange.y - t, dist);
-
-                            // 这一步总共的“光学厚度” (Optical Depth)
-                            // 密度 * 距离
-                            float segmentDensity = litOcc.w * realDist;
-                            // 这一步的透光率 (Segment Transmittance)
-                            // 严谨物理公式是 exp(-segmentDensity)
-                            float segmentTransmittance = exp(-segmentDensity);
-
-                            // 3. 累积光照 (Radiance)
-                            // 能量守恒：被阻挡掉的光转化为了发光（假设是自发光体）
-                            // 或者是简单的累加：Emission * 这一段总共的可见度
-                            // 近似：(Emission) * (进入时的透光率 - 离开时的透光率)
-                            // 这表示“这段路程中被截获/发出的光”
-                            float3 segmentLight = litOcc.rgb * (1.0 - segmentTransmittance);
-
-                            hit.rgb += hit.w * segmentLight;
-
-                            // 4. 全局透光率衰减
-                            hit.w *= segmentTransmittance;
-                            
-                            t += realDist;
-                        }
-                        
-                    }
-                    else
-                    {
-                        // 这里可以往回缩一点，但不要缩过头了
-                        // 规则：如果 distance > 30，那么向后缩3，否则向后缩 distance / 10
-                        t += sdf;
-                        /*if (sdf > 30)
-                            t -= 3;
-                        else
-                            t -= sdf / 10.0f; */     
-                    }   
-                }
-    
-                return hit;
-            }
             
             float InterleavedGradientNoise(float2 position_screen)
             {

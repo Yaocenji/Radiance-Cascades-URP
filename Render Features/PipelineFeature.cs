@@ -167,13 +167,12 @@ public class PipelineFeature : ScriptableRendererFeature
             context.ExecuteCommandBuffer(cmd);
             cmd.Clear();
             
-            // A. 定义我们要用哪些 Shader Pass 来画 (比如 UniversalForward, SRPDefaultUnlit)
+            // 定义我们要用哪些 Shader Pass 来画
             var shaderTagId = new ShaderTagId("GBuffer_NormSpec"); 
             var drawingSettings = CreateDrawingSettings(shaderTagId, ref renderingData, SortingCriteria.CommonOpaque);
-            // B. 过滤：只画 Settings 里设置的层级 (Wall, Light)
+            // 过滤：只画 Settings 里设置的层级
             var filteringSettings = new FilteringSettings(RenderQueueRange.opaque);
-            // C. 绘制！
-            // 这一步会把符合 Layer 的物体画到 m_LightSrc_Occlusion 上
+            // 绘制
             context.DrawRenderers(renderingData.cullResults, ref drawingSettings, ref filteringSettings);
             
             cmd.SetGlobalTexture("_NormSpecGBuffer", m_NormalSpecularGBufferHandle);

@@ -36,6 +36,9 @@ Shader "RadianceCascades/FinalRender"
             TEXTURE2D(_NormSpecGBuffer);
             TEXTURE2D(_LightSrc_Occlusion); 
 
+            TEXTURE2D(_SDF_World);
+            TEXTURE2D(_LightSrc_Occlusion_World);
+
             CBUFFER_START(UnityPreMaterial)
             float2 _RC_Param;
             RC_SDF_LIGHT_DATA
@@ -145,18 +148,25 @@ Shader "RadianceCascades/FinalRender"
                 
                 float minSDF = 65535.0f;
                 float minSDFt = 0;
-                //float lastSDF = 65535.0f
 
                 const int maxMarchingStep = 32;
                 for (int i = 0; i < maxMarchingStep; i++)
                 {
                     float2 currentPosition = rayOrigin + t * rayDirection * texelSize;
 
-                    if (t > rayRange.y || currentPosition.x < 0 || currentPosition.y < 0 || currentPosition.x > 1 || currentPosition.y > 1)
+                    if (t > rayRange.y /*|| currentPosition.x < 0 || currentPosition.y < 0 || currentPosition.x > 1 || currentPosition.y > 1*/)
                     {
                         break;
                     }
-                    float sdf = SAMPLE_TEXTURE2D(_SDF, sampler_LinearRepeat, currentPosition).r;
+                    
+                    // 选择合适的图来采样SDF信息
+                    // 判断是否超出屏幕
+                    bool beyoundScreen = currentPosition.x < 0 || currentPosition.y < 0 || currentPosition.x > 1 || currentPosition.y > 1;
+                    // 采样世界空间的UV坐标
+                    // 目前是硬编码：世界空间=屏幕空间放大四倍 
+                    float2 currentPositionWorld = (currentPosition - .5f) / 4.0f + .5f;
+                    
+                    float sdf = beyoundScreen ? 4.0f * SAMPLE_TEXTURE2D(_SDF_World, sampler_LinearClamp, currentPositionWorld).r : SAMPLE_TEXTURE2D(_SDF, sampler_LinearClamp, currentPosition).r;
                     if (sdf < minSDF)
                     {
                         minSDF = sdf;
@@ -169,7 +179,7 @@ Shader "RadianceCascades/FinalRender"
                     if (sdf < 0.15)
                     {
                         // 判断此处的厚度
-                        float4 litOcc = float4(SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
+                        float4 litOcc = float4(beyoundScreen ? SAMPLE_TEXTURE2D(_LightSrc_Occlusion_World, sampler_LinearClamp, currentPositionWorld) : SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
                         
                         float dist = max(abs(sdf), 1.5);
                         
@@ -215,7 +225,8 @@ Shader "RadianceCascades/FinalRender"
                     if (sdf < 0.15)
                     {
                         // 撞到物体，直接结束
-                        float4 litOcc = float4(SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
+                        float4 litOcc = float4(beyoundScreen ? SAMPLE_TEXTURE2D(_LightSrc_Occlusion_World, sampler_LinearClamp, currentPositionWorld) : SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
+
                         hit.xyz += hit.w * litOcc.rgb * .5f;
                         hit.w = 0;
                         break;
@@ -406,7 +417,8 @@ Shader "RadianceCascades/FinalRender"
                     for (int i = 0; i < 4; ++i)
                     {
                         float lambert = clamp(dot(lightDirs[i], normal) /** .5 + .5*/, 0, 1);
-                        leakedGI += SAMPLE_TEXTURE2D_LOD(_RC_FourDirGI, my_Trilinear_Clamp, sampleUVs[i], jitteredLOD).rgb * .25f * lambert;
+                        //leakedGI += SAMPLE_TEXTURE2D_LOD(_RC_FourDirGI, my_Trilinear_Clamp, sampleUVs[i], jitteredLOD).rgb * .25f * lambert;
+                        leakedGI += SAMPLE_TEXTURE2D(_RC_FourDirGI, sampler_LinearClamp, sampleUVs[i]).rgb * .25f * lambert;
                         leakedGI += CalculateAllSDFLight(sampleWS, normal);
                     }
                     

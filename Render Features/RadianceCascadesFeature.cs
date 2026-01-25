@@ -115,12 +115,19 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
         private Material rcMat;
         
         // 使用 RTHandle 而不是 RenderTexture
+        // 屏幕空间的 基础RC
         private RTHandle m_LightSrc_Occlusion;
         private RTHandle m_JFA_Handle_0;
         private RTHandle m_JFA_Handle_1;
         private RTHandle m_SDF_Handle;
         private RTHandle m_RadianceHandle_0;
         private RTHandle m_RadianceHandle_1; // 用于 Cascade Merge Ping-Pong
+
+        // 大范围空间的低频光源信息与场景SDF信息
+        private RTHandle m_LightSrc_Occlusion_World;
+        private RTHandle m_JFA_Handle_0_World;
+        private RTHandle m_JFA_Handle_1_World;
+        private RTHandle m_SDF_Handle_World;
         
         private bool jumpFlood1IsFinal = false;
         private bool gi1IsFinal = false;
@@ -237,9 +244,17 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
             // ReAllocateIfNeeded 会自动判断：如果 width/height/format 变了，它会释放旧的，分配新的。
             RenderingUtils.ReAllocateIfNeeded(ref m_LightSrc_Occlusion, lsoDesc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_LightSrc_Occlusion");
             
+            // 世界空间版本使用相同的分辨率（暂时，之后可调整）
+            RenderingUtils.ReAllocateIfNeeded(ref m_LightSrc_Occlusion_World, lsoDesc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_LightSrc_Occlusion_World");
+            
             RenderingUtils.ReAllocateIfNeeded(ref m_JFA_Handle_0, jfaDesc, FilterMode.Point, TextureWrapMode.Clamp, name: "_JFA_0");
             RenderingUtils.ReAllocateIfNeeded(ref m_JFA_Handle_1, jfaDesc, FilterMode.Point, TextureWrapMode.Clamp, name: "_JFA_1");
             RenderingUtils.ReAllocateIfNeeded(ref m_SDF_Handle, sdfDesc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_SDF");
+            
+            // 世界空间版本的 JFA 和 SDF
+            RenderingUtils.ReAllocateIfNeeded(ref m_JFA_Handle_0_World, jfaDesc, FilterMode.Point, TextureWrapMode.Clamp, name: "_JFA_0_World");
+            RenderingUtils.ReAllocateIfNeeded(ref m_JFA_Handle_1_World, jfaDesc, FilterMode.Point, TextureWrapMode.Clamp, name: "_JFA_1_World");
+            RenderingUtils.ReAllocateIfNeeded(ref m_SDF_Handle_World, sdfDesc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_SDF_World");
             
             // Radiance 需要双线性插值 (Bilinear)，这是 RC Merge 的关键！
             RenderingUtils.ReAllocateIfNeeded(ref m_RadianceHandle_0, radianceDesc, FilterMode.Bilinear, TextureWrapMode.Clamp, name: "_RC_0");
@@ -284,6 +299,144 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
             
             cmd.EndSample("Render Light Source And Occlusion.");
             
+            // =========================================================
+            // 渲染世界空间版本：m_LightSrc_Occlusion_World
+            // =========================================================
+            cmd.BeginSample("Render Light Source And Occlusion World.");
+            
+            // 计算摄像机屏幕在世界空间中的矩形（扩大4倍）
+            // 获取摄像机正交尺寸（如果是正交相机）或计算透视相机的视锥体
+            float worldRectSize = 4.0f; // 暂时硬编码为4倍
+            
+            // 计算世界空间矩形尺寸
+            float orthoSize = m_Camera.orthographicSize;
+            float aspectRatio = width / (float)height;
+            float worldWidth = orthoSize * 2.0f * worldRectSize * aspectRatio; // 考虑宽高比
+            float worldHeight = orthoSize * 2.0f * worldRectSize;
+            
+            // 创建正交投影矩阵（世界空间，以摄像机为中心）
+            // 使用正交投影，覆盖更大的世界空间范围
+            Matrix4x4 worldProjLogical = Matrix4x4.Ortho(-worldWidth * 0.5f, worldWidth * 0.5f, 
+                -worldHeight * 0.5f, worldHeight * 0.5f, 
+                m_Camera.nearClipPlane, m_Camera.farClipPlane);
+            Matrix4x4 worldProj = GL.GetGPUProjectionMatrix(worldProjLogical, false);
+            
+            // 使用摄像机的 View 矩阵（保持相同的观察方向）
+            Matrix4x4 worldView = m_Camera.worldToCameraMatrix;
+            
+            // 设置自定义的 View 和 Projection 矩阵
+            cmd.SetViewProjectionMatrices(worldView, worldProj);
+            
+            // 设置渲染目标为世界空间版本
+            cmd.SetRenderTarget(m_LightSrc_Occlusion_World);
+            cmd.ClearRenderTarget(true, true, Color.clear);
+            
+            // 世界空间的绘制，不会用以往的弹射
+            // 传递bounce intensity
+            cmd.SetGlobalFloat("_RC_BounceIntensity", 0);
+            
+            // 执行命令以应用矩阵和渲染目标设置
+            context.ExecuteCommandBuffer(cmd);
+            cmd.Clear();
+            
+            // 注意：在 URP 中，剔除是在 ScriptableRenderer 层面完成的，我们无法在 RenderPass 中重新进行剔除
+            // 因此我们使用原始的 cullResults，但由于矩阵已经改变，物体会以不同的方式渲染
+            // 为了尽可能包含更多物体，我们尝试修改剔除参数（虽然这不会真正重新剔除）
+            // 实际效果：使用原始剔除结果，但使用新的矩阵进行渲染
+            
+            // 尝试获取新的剔除参数
+            ScriptableCullingParameters cullingParams;
+            CullingResults wideCullResults;
+            if (m_Camera.TryGetCullingParameters(out cullingParams))
+            {
+                // 修改剔除矩阵以使用新的投影矩阵（虽然不会真正重新剔除，但可以用于调试）
+                cullingParams.cullingMatrix = worldProjLogical * worldView;// wideProjMatrixLogical * viewMatrix;
+                // 禁用背面剔除选项（虽然不会真正禁用，但可以用于参考）
+                cullingParams.cullingOptions = CullingOptions.None;
+                
+                // 确保标记为正交（因为你手动构建的是 Ortho 矩阵）
+                cullingParams.isOrthographic = true;
+                
+                // 手动计算并填充裁剪平面
+                // 既然 cullingPlaneCount = 0 报错，我们就手动算好给它
+                // GeometryUtility.CalculateFrustumPlanes 完美支持 Proj * View 矩阵
+                Plane[] customPlanes = GeometryUtility.CalculateFrustumPlanes(worldProjLogical * worldView);
+                // 将计算出的 6 个平面填入 cullingParams
+                for (int i = 0; i < 6; i++)
+                {
+                    cullingParams.SetCullingPlane(i, customPlanes[i]);
+                }
+                cullingParams.cullingPlaneCount = 6;
+                
+                wideCullResults = context.Cull(ref cullingParams);
+            }
+            else
+            {
+                wideCullResults = renderingData.cullResults;
+                Debug.Log("Culling parameters not found.");
+            }
+            // 使用原始剔除结果进行绘制（注意：这可能导致一些物体被错误剔除）
+            // 但由于矩阵已经改变，渲染结果会反映新的投影空间
+            context.DrawRenderers(wideCullResults, ref drawingSettings, ref filteringSettings);
+            
+            // 立即恢复原始矩阵，确保不影响后续的 RenderPass
+            // 注意：必须在 DrawRenderers 之后立即恢复，因为 SetViewProjectionMatrices 会影响全局渲染状态
+            // 使用摄像机的原始矩阵，确保与渲染管线其他部分一致
+            Matrix4x4 restoreView = renderingData.cameraData.GetViewMatrix();
+            Matrix4x4 restoreProj = renderingData.cameraData.GetProjectionMatrix();
+            restoreProj = GL.GetGPUProjectionMatrix(restoreProj, false);
+            cmd.SetViewProjectionMatrices(restoreView, restoreProj);
+            // 立即执行命令以确保矩阵被恢复，避免影响后续 RenderPass
+            context.ExecuteCommandBuffer(cmd);
+            cmd.Clear();
+            
+            cmd.EndSample("Render Light Source And Occlusion World.");
+            
+
+
+            
+            // =========================================================
+            // 世界空间版本的 JFA 和 SDF 计算
+            // =========================================================
+            cmd.BeginSample("Jump Flood SDF World");
+            
+            // 从世界空间版本的 LightSrc_Occlusion 开始 JFA
+            Blitter.BlitCameraTexture(cmd, m_LightSrc_Occlusion_World, m_JFA_Handle_0_World, screenUVMat, 0);
+            
+            // 使用独立的标志位来跟踪世界空间版本的 JFA 状态
+            bool jumpFlood1IsFinal_World = true;
+            int max_World = Mathf.Max(width, height);
+            int steps_World = Mathf.CeilToInt(Mathf.Log(max_World, 2));
+            float stepSize_World = 2;
+            for (var n = 0; n < steps_World; n++)
+            {
+                stepSize_World *= 0.5f;
+                cmd.SetGlobalFloat("_StepSize", stepSize_World);
+                BlitJumpFloodRT_World(cmd, ref jumpFlood1IsFinal_World);
+            }
+
+            // 临时的LightOcclusion_World
+            cmd.SetGlobalTexture("_LightSrc_Occlusion", m_LightSrc_Occlusion_World);
+            // 注意到下面就设置回来了，所以这里临时设置一下是没问题的
+            
+            // 转换为 SDF
+            cmd.DisableShaderKeyword("RC_USE_WORLD_SPACE_SDF_AS_BOTTOM_LAYER");
+            if (jumpFlood1IsFinal_World)
+            {
+                Blitter.BlitCameraTexture(cmd, m_JFA_Handle_1_World, m_SDF_Handle_World, sdfMat, 0);
+            }
+            else
+            {
+                Blitter.BlitCameraTexture(cmd, m_JFA_Handle_0_World, m_SDF_Handle_World, sdfMat, 0);
+            }
+            // 立即恢复LightSrc_Occlusion
+            cmd.SetGlobalTexture("_LightSrc_Occlusion", m_LightSrc_Occlusion);
+            
+            cmd.EndSample("Jump Flood SDF World");
+
+            // =========================================================
+            // 屏幕空间版本的 JFA 和 SDF 计算
+            // =========================================================
             cmd.BeginSample("Jump Flood SDF");
             
             Blitter.BlitCameraTexture(cmd, m_LightSrc_Occlusion, m_JFA_Handle_0, screenUVMat, 0);
@@ -299,6 +452,10 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
                 BlitJumpFloodRT(cmd);
             }
             
+
+            // 需要用世界空间SDF来给屏幕空间SDF做一个最小值，因为屏幕空间SDF可能会因为超出屏幕而采样不到
+            cmd.EnableShaderKeyword("RC_USE_WORLD_SPACE_SDF_AS_BOTTOM_LAYER");
+            cmd.SetGlobalTexture("_SDF_World", m_SDF_Handle_World);
             if (jumpFlood1IsFinal)
             {
                 Blitter.BlitCameraTexture(cmd, m_JFA_Handle_1, m_SDF_Handle, sdfMat, 0);
@@ -314,6 +471,10 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
             cmd.Clear();
             
             cmd.BeginSample("Radiance Cascade Core");
+
+            // 设置世界空间版本的SDF和LightSrc_Occlusion
+            cmd.SetGlobalTexture("_SDF_World", m_SDF_Handle_World);
+            cmd.SetGlobalTexture("_LightSrc_Occlusion_World", m_LightSrc_Occlusion_World);
             
             cmd.SetGlobalVector("_RC_Param", new Vector4(width, height, 0.0f, 0.0f));
             //Passing values to the GI Shader
@@ -339,8 +500,9 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
             }
             
             // 补充：生成mipmap，之后会用
-            cmd.GenerateMips(m_RadianceHandle_0);
-            cmd.GenerateMips(m_RadianceHandle_1);
+            // 目前用不到了
+            // cmd.GenerateMips(m_RadianceHandle_0);
+            // cmd.GenerateMips(m_RadianceHandle_1);
             
             cmd.EndSample("Radiance Cascade Core");
             
@@ -387,8 +549,14 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
         // 2. 记得释放
         public void Dispose()
         {
+            m_LightSrc_Occlusion?.Release();
+            m_LightSrc_Occlusion_World?.Release();
             m_JFA_Handle_0?.Release();
             m_JFA_Handle_1?.Release();
+            m_JFA_Handle_0_World?.Release();
+            m_JFA_Handle_1_World?.Release();
+            m_SDF_Handle?.Release();
+            m_SDF_Handle_World?.Release();
             m_RadianceHandle_0?.Release();
             m_RadianceHandle_1?.Release();
         }
@@ -402,6 +570,17 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
                 Blitter.BlitCameraTexture(cmd, m_JFA_Handle_1, m_JFA_Handle_0, jfaMat, 0);
             }
             jumpFlood1IsFinal = !jumpFlood1IsFinal;
+        }
+        
+        private void BlitJumpFloodRT_World(CommandBuffer cmd, ref bool isFinal) {
+            if (isFinal)
+            {
+                Blitter.BlitCameraTexture(cmd, m_JFA_Handle_0_World, m_JFA_Handle_1_World, jfaMat, 0);
+            }
+            else {
+                Blitter.BlitCameraTexture(cmd, m_JFA_Handle_1_World, m_JFA_Handle_0_World, jfaMat, 0);
+            }
+            isFinal = !isFinal;
         }
         private void BlitGiRT(CommandBuffer cmd)
         {
