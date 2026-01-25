@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Tilemaps;
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
@@ -10,7 +11,7 @@ public class RCObject : MonoBehaviour
     // --- 属性配置 ---
     
     [Header("Textures")]
-    [Tooltip("如果不填：\n1. SpriteRenderer 会自动使用当前的 Sprite 图片\n2. MeshRenderer 会使用材质球默认图片")]
+    [Tooltip("如果不填：\n1. SpriteRenderer 会自动使用当前的 Sprite 图片\n2. TilemapRenderer/MeshRenderer 会使用材质球默认图片")]
     public Texture2D overrideAlbedo; 
     public Texture2D normalMap;
 
@@ -26,13 +27,18 @@ public class RCObject : MonoBehaviour
     [Tooltip("遮蔽强度 (0=完全透明, 1=完全不透明)")]
     public float occlusion = 1.0f;
     
+    [Range(0.0f, 10.0f)]
+    [Tooltip("GI系数 (控制全局光照强度，默认1.0)")]
+    public float giCoefficient = 1.0f;
+    
     [Header("Normal Control")]
     public bool manualRotation = false;
     [Range(0, 360)] public float overrideAngle = 0f;
 
     // --- 内部缓存 ---
     private Renderer _renderer;
-    private SpriteRenderer _spriteRenderer; // 额外缓存 SpriteRenderer
+    private SpriteRenderer _spriteRenderer; // 额外缓存 SpriteRenderer（可选）
+    private TilemapRenderer _tilemapRenderer; // 额外缓存 TilemapRenderer（可选）
     private MaterialPropertyBlock _mpb;
 
     // --- ID 缓存 ---
@@ -41,6 +47,7 @@ public class RCObject : MonoBehaviour
     private static readonly int ID_EmissionColor = Shader.PropertyToID("_EmissionColor");
     private static readonly int ID_IsWall = Shader.PropertyToID("_IsWall");
     private static readonly int ID_Occlusion = Shader.PropertyToID("_Occlusion");
+    private static readonly int ID_GICoefficient = Shader.PropertyToID("_GICoefficient");
     private static readonly int ID_RotationSinCos = Shader.PropertyToID("_RotationSinCos");
     private static readonly int ID_FlipSigns = Shader.PropertyToID("_FlipSigns"); // 新增：处理Sprite翻转
 
@@ -68,9 +75,13 @@ public class RCObject : MonoBehaviour
         if (_renderer == null)
             _renderer = GetComponent<Renderer>();
         
-        // 尝试获取 SpriteRenderer (如果是 MeshRenderer 则为 null)
+        // 尝试获取 SpriteRenderer (如果是其他类型则为 null)
         if (_spriteRenderer == null)
             _spriteRenderer = GetComponent<SpriteRenderer>();
+        
+        // 尝试获取 TilemapRenderer (如果是其他类型则为 null)
+        if (_tilemapRenderer == null)
+            _tilemapRenderer = GetComponent<TilemapRenderer>();
 
         if (_mpb == null)
             _mpb = new MaterialPropertyBlock();
@@ -101,7 +112,7 @@ public class RCObject : MonoBehaviour
             // 在 URP SRP Batcher 中，有时 MPB 会导致 Sprite 自身的纹理绑定失效，显式设置最稳妥。
             _mpb.SetTexture(ID_MainTex, _spriteRenderer.sprite.texture);
         }
-        // 情况 C: MeshRenderer 且没指定 Override -> MPB 里不存 _MainTex，Shader 会自动回退用材质球的纹理
+        // 情况 C: TilemapRenderer/MeshRenderer 且没指定 Override -> MPB 里不存 _MainTex，Shader 会自动回退用材质球的纹理
 
         // 4. 设置法线
         if (normalMap != null)
@@ -111,6 +122,7 @@ public class RCObject : MonoBehaviour
         _mpb.SetColor(ID_EmissionColor, emissionColor);
         _mpb.SetFloat(ID_IsWall, isWall ? 1.0f : 0.0f);
         _mpb.SetFloat(ID_Occlusion, occlusion);
+        _mpb.SetFloat(ID_GICoefficient, giCoefficient);
 
         // 6. 计算旋转 (包含 Flip 处理)
         CalculateRotationAndFlip();
@@ -142,15 +154,17 @@ public class RCObject : MonoBehaviour
 
         // --- Flip (翻转) 支持 ---
         // 如果 Sprite 翻转了，法线也需要翻转，否则光照会反
+        // 注意：TilemapRenderer 不支持 flipX/flipY，只检查 Transform 缩放
         float flipX = 1.0f;
         float flipY = 1.0f;
 
         if (_spriteRenderer != null)
         {
+            // SpriteRenderer 支持 flipX/flipY
             flipX = _spriteRenderer.flipX ? -1.0f : 1.0f;
             flipY = _spriteRenderer.flipY ? -1.0f : 1.0f;
         }
-        // Transform 的负缩放也会导致翻转，检查一下
+        // Transform 的负缩放也会导致翻转，检查一下（适用于所有 Renderer 类型）
         if (transform.lossyScale.x < 0) flipX *= -1.0f;
         if (transform.lossyScale.y < 0) flipY *= -1.0f;
 
@@ -182,7 +196,14 @@ public class RCObject : MonoBehaviour
         {
             // 只有当物体发生位移、旋转、缩放 或者 是动画控制的 Sprite 发生变化时才更新
             // 注意：如果你的 Sprite 有序列帧动画，sprite.texture 会变，必须每帧更新或监听变化
-            if (transform.hasChanged || (_spriteRenderer != null && _spriteRenderer.sprite != null)) 
+            // TilemapRenderer 不需要检查 sprite 变化，因为它使用 Tilemap 资源
+            bool needsUpdate = transform.hasChanged;
+            if (_spriteRenderer != null && _spriteRenderer.sprite != null)
+            {
+                needsUpdate = true; // SpriteRenderer 可能需要每帧更新（序列帧动画）
+            }
+            
+            if (needsUpdate)
             {
                 ApplyProperties();
                 transform.hasChanged = false;

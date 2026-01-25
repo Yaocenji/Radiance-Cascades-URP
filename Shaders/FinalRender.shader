@@ -1,4 +1,4 @@
-﻿Shader "RadianceCascades/FinalRender"
+Shader "RadianceCascades/FinalRender"
 {
     Properties
     {
@@ -272,7 +272,7 @@
 
                     // 光源到片元方向
                     float3 lightDir = normalize(float3(posWS, 0) - lightPosWS);
-                    float lambert = dot(-lightDir, normal) * .5 + .5;
+                    float lambert = clamp(dot(-lightDir, normal) /** .5 + .5*/, 0, 1);
 
                     float2 posPS = posWorld2Pixel(float3(posWS, 0), _RC_Param);
                     float2 posUV = posPS / _RC_Param;
@@ -306,9 +306,28 @@
                 // 基础色
                 half3 albedo = SAMPLE_TEXTURE2D(_AlbedoGBuffer, sampler_LinearClamp, uv).rgb;
                 
-                // 采样法线
-                float3 normal = SAMPLE_TEXTURE2D(_NormSpecGBuffer, sampler_LinearClamp, uv);
-                normal = normal * 2 - 1;
+                // 采样法线和GI系数（从RG通道解码法线，从B通道读取GI系数）
+                half4 normSpecData = SAMPLE_TEXTURE2D(_NormSpecGBuffer, sampler_LinearClamp, uv);
+                half2 encodedNormal = normSpecData.rg;
+                // 解包GI系数
+                half giCoefficient = normSpecData.b * 10.0;
+                
+                // 法线反映射：从八面体映射恢复3D法线
+                // 将 [0, 1] 映射回 [-1, 1]
+                half2 e = encodedNormal * 2.0 - 1.0;
+                half3 normal;
+                normal.xy = e;
+                normal.z = sqrt(1.0 - e.x * e.x - e.y * e.y);
+                
+                // 从八面体映射恢复（标准解码算法）
+                // normal = half3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+                // if (normal.z < 0.0)
+                // {
+                //     // z < 0 的情况，需要翻转
+                //     half2 signE = e >= 0.0 ? 1.0 : -1.0;
+                //     normal.xy = (1.0 - abs(normal.yx)) * signE;
+                // }
+                // normal = normalize(normal);
                 
                 half3 gi = 0;
                 // 四次采样，分别计算法线
@@ -333,7 +352,7 @@
                 for (int i = 0; i < 4; ++i)
                 {
                     // 兰伯特系数
-                    float lambert = dot(lightDirs[i], normal) * .5 + .5;
+                    float lambert = clamp(dot(lightDirs[i], normal) /** .5 + .5*/, 0, 1);
                     gi += SAMPLE_TEXTURE2D(_RC_FourDirGI, sampler_LinearClamp, uvs[i]).rgb * .25f * lambert;
                 }
                 
@@ -386,7 +405,7 @@
                     sampleUVs[3] = sample_RC_UV * .5f + float2(.5, .5);
                     for (int i = 0; i < 4; ++i)
                     {
-                        float lambert = dot(lightDirs[i], normal);
+                        float lambert = clamp(dot(lightDirs[i], normal) /** .5 + .5*/, 0, 1);
                         leakedGI += SAMPLE_TEXTURE2D_LOD(_RC_FourDirGI, my_Trilinear_Clamp, sampleUVs[i], jitteredLOD).rgb * .25f * lambert;
                         leakedGI += CalculateAllSDFLight(sampleWS, normal);
                     }
@@ -402,7 +421,9 @@
                 }
                 #endif
                 
-                ans.xyz = albedo * gi;
+                gi *= giCoefficient;
+                // 应用GI系数
+                ans.xyz = albedo * (gi + .05f);
 
                 // 以下是debug内容
                 

@@ -19,8 +19,8 @@ public class RadianceCascadesVolume : VolumeComponent, IPostProcessComponent
     public Quality quality = Quality.Ultra;
     
     [Header("Quality & Performance")]
-    [Tooltip("渲染分辨率比例 (0.1 - 1.0)。注意：在Volume之间混合此参数会导致RT重建，建议保持全局一致。")]
-    public ClampedFloatParameter renderScale = new ClampedFloatParameter(0.5f, 0.1f, 1.0f);
+    [Tooltip("渲染分辨率比例 (0.1 - 4.0)。注意：在Volume之间混合此参数会导致RT重建，建议保持全局一致。")]
+    public ClampedFloatParameter renderScale = new ClampedFloatParameter(0.5f, 0.1f, 4.0f);
 
     [Tooltip("级联层数 (1 - 10)。层数越多，计算越慢，但能覆盖更远的距离。")]
     public ClampedIntParameter cascadeCount = new ClampedIntParameter(4, 1, 10);
@@ -30,7 +30,7 @@ public class RadianceCascadesVolume : VolumeComponent, IPostProcessComponent
     public ClampedFloatParameter rayRange = new ClampedFloatParameter(1.0f, 0.1f, 2.0f);
 
     [Tooltip("多次反弹的强度 (建议 0.2-0.8)。过高会导致光照无限累积爆掉。")]
-    public ClampedFloatParameter bounceIntensity = new ClampedFloatParameter(0.6f, 0.0f, 1.2f);
+    public ClampedFloatParameter bounceIntensity = new ClampedFloatParameter(0.6f, 0.0f, 3.6f);
 
     [Header("Environment")]
     [Tooltip("天空/环境光颜色")]

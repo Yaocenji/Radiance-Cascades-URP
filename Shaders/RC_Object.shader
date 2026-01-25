@@ -1,4 +1,4 @@
-﻿Shader "RadianceCascades/RC_Object"
+Shader "RadianceCascades/RC_Object"
 {
     Properties
     {
@@ -141,6 +141,7 @@
                 float4 _RC_Param;
                 float4x4 _RC_PrevViewProjMatrix;
                 float4x4 _RC_CurrViewProjMatrix;
+                float _RC_BounceIntensity;
             CBUFFER_END
 
             TEXTURE2D(_MainTex);        SAMPLER(sampler_MainTex);
@@ -214,13 +215,13 @@
                 
                 half occlusion = baseOcclusion * _Occlusion;
                 
-                if (occlusion > .5f)
+                if (occlusion > 0.001f)
                 {
                     float2 screenUV = IN.positionCS.xy / _RC_Param.xy;// * _RC_History_Param.zw;
                     screenUV -= motionvector;
                     half3 historyColor = SAMPLE_TEXTURE2D(_RC_HistoryTexture, sampler_PointClamp, screenUV).rgb;
                     //if (length(historyColor) > 0.1f)
-                    emitColorAns += historyColor * .0f;
+                    emitColorAns += historyColor * _RC_BounceIntensity;
                 }
                 // emitColorAns = float3(motionvector, 0);
                 // occlusion *= .1;   // TMP
@@ -256,6 +257,8 @@
                 float4 _BumpMap_ST;
                 half4 _EmissionColor;
                 half _IsWall;
+                half _Occlusion;
+                half _GICoefficient;
                 float2 _RotationSinCos; // x=cos, y=sin
             CBUFFER_END
 
@@ -313,18 +316,51 @@
             }
 
             // ---------------------------------------------------------
+            // 法线映射：将3D法线压缩到2D (RG通道)
+            // 使用八面体映射 (Octahedral Mapping)
+            // ---------------------------------------------------------
+            half2 EncodeNormalOctahedron(half3 n)
+            {
+                // // 将法线映射到八面体，然后展开到平面
+                // n /= (abs(n.x) + abs(n.y) + abs(n.z));
+                // half2 result;
+                // if (n.z >= 0.0)
+                // {
+                //     result = n.xy;
+                // }
+                // else
+                // {
+                //     result = (1.0 - abs(n.yx)) * (n.xy >= 0.0 ? 1.0 : -1.0);
+                // }
+                // // 映射到 [0, 1] 范围
+                // return result * 0.5 + 0.5;
+                return normalize(n).xy * 0.5 + 0.5;
+            }
+
+            // ---------------------------------------------------------
             // 5. 片元着色器 (模板)
             // ---------------------------------------------------------
             half4 Frag(Varyings IN) : SV_Target
             {
+                // 采样基础色
+                half4 albedo = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, IN.uv);
+                // 计算基础occlusion：基于isWall和alpha
+                half baseOcclusion = (abs(_IsWall) * albedo.a) <= .5f ? 0 : 1;
+                clip(albedo.a - .5f);
+                half occlusion = baseOcclusion * _Occlusion;
+
                 half4 packednorm = SAMPLE_TEXTURE2D(_BumpMap, sampler_BumpMap, IN.uv);
                 half3 unpackednorm = UnpackNormal(packednorm);
                 unpackednorm = normalize(unpackednorm);
                 
                 half3 normalWS = mul(half3x3(IN.tangentWS, IN.bitangentWS, IN.normalWS), unpackednorm);
 
-                //return _RotationSinCos.x;
-                return half4(normalWS.xyz * .5 + .5, 1);
+                // 将法线编码到RG通道
+                half2 encodedNormal = EncodeNormalOctahedron(normalWS);
+                
+                // RG通道存储编码后的法线，B通道存储GI系数，A通道保留
+                // GI系数用 / 10 打包到[0, 1]，这意味着GI系数范围是0.1到10.0
+                return half4(encodedNormal /** (occlusion > 0.001 ? 1 : 0.0001)*/, _GICoefficient / 10.0, 1.0);
             }
             ENDHLSL
         }

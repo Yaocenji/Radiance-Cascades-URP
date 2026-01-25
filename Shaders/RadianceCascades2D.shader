@@ -611,7 +611,8 @@
                             // 太阳方向
                             float2 sunDir = float2(cos(_RC_SunAngle), sin(_RC_SunAngle));
                             // 太阳
-                            float3 sun = _RC_SunColor * _RC_SunIntensity * pow(clamp(dot(rayDirection, sunDir), 0, 1), _RC_SunHardness);
+                            float sunHardness = pow(2, _RC_SunHardness);
+                            float3 sun = _RC_SunColor * _RC_SunIntensity * sunHardness * pow(clamp(dot(rayDirection, sunDir), 0, 1), sunHardness);
                             radiance.rgb += (sky + sun) * radiance.a;
                         }
                     }

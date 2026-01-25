@@ -11,7 +11,7 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
     [System.Serializable]
     public class Settings
     {
-        [Range(0.1f, 1.0f)] public float renderScale = 1.0f; // 动态画质调整
+        [Range(0.1f, 4.0f)] public float renderScale = 1.0f; // 动态画质调整
         [Range(0.1f, 1.0f)] public float rayRange = 1.0f; // 射线长度
         [Range(1, MAX_CASCADE_COUNT)] public int cascadeCount = 1; // 级联数
         public LayerMask targetLayerMask; // 在Inspector里勾选 Wall 和 Light 层
@@ -156,7 +156,7 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
             currentRenderScale = useVolume ? volume.renderScale.value : m_DefaultSettings.renderScale;
             currentCascadeCount = useVolume ? volume.cascadeCount.value : m_DefaultSettings.cascadeCount;
             currentRayRange = useVolume ? volume.rayRange.value : m_DefaultSettings.rayRange;
-            currentBounceIntensity = useVolume ? volume.bounceIntensity.value : 0.6f; // 默认反弹值
+            currentBounceIntensity = useVolume ? volume.bounceIntensity.value : 0.9f; // 默认反弹值
             currentSkyColor = useVolume ? volume.skyColor.value : Color.white;
             currentSkyIntensity = useVolume ? volume.skyIntensity.value : 0;
             currentSunColor = useVolume ? volume.sunColor.value : Color.white;
@@ -262,9 +262,10 @@ public class RadianceCascadesFeature : ScriptableRendererFeature
             
             // 传递当前帧的 VP 矩阵
             cmd.SetGlobalMatrix("_RC_CurrViewProjMatrix", proj * view);
-            
-            
+            // 传递分辨率
             cmd.SetGlobalVector("_RC_Param", new Vector4(width, height, 0.0f, 0.0f));
+            // 传递bounce intensity
+            cmd.SetGlobalFloat("_RC_BounceIntensity", currentBounceIntensity);
             
             cmd.BeginSample("Render Light Source And Occlusion.");
             // 渲染 光源和遮蔽
