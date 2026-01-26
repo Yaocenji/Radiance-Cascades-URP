@@ -44,6 +44,8 @@ Shader "RadianceCascades/FinalRender"
             RC_SDF_LIGHT_DATA
             float _RC_TrickLightIntensity;
             float _RC_TrickLightDistance;
+
+            float4 _Player_PosWS_Radius_Smoothness_Angle;    // 玩家的世界空间位置，影响半径，视野角度
             CBUFFER_END
 
             // 定义新采样器用于采样lod
@@ -102,42 +104,6 @@ Shader "RadianceCascades/FinalRender"
 
                 return pixelPos;
             }
-
-            // SDF投影计算
-            /*float SDFLight(float2 fragmentPos, float2 lightPos)
-            {
-                float2 dir = normalize(lightPos - fragmentPos);
-                float allDistance = length(lightPos - fragmentPos);
-                float t = 0;
-                float lighted = 1;
-                for (int i = 0; i < 32; ++i)
-                {
-                    float2 thisPos = fragmentPos + t * dir;
-                    float SDF = SAMPLE_TEXTURE2D(_SDF, sampler_LinearClamp, thisPos / _RC_Param).r;
-                    if (SDF < 0)
-                    {
-                        lighted = 0;
-                        break;
-                    }
-                    else
-                    {
-                        float4 litOcc = float4(SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, thisPos / _RC_Param));
-                        if (allDistance - t >= SDF)
-                        {
-                            t += SDF; 
-                            
-                            continue;
-                        }else
-                        {
-                            t = allDistance;
-                            lighted = 1;
-                            break;
-                        }
-                    }
-                }
-                return lighted;
-            }*/
-
 
             //Raymarching
             float4 SampleSDF(float2 rayOrigin, float2 rayDirection, float2 rayRange)
@@ -298,6 +264,23 @@ Shader "RadianceCascades/FinalRender"
                 }
                 return ans;
             }
+
+
+            // 调整饱和度，输入：颜色，饱和度，输出：调整后的颜色
+            float3 AdjustSaturation(float3 color, float saturation = 1.0)
+            {
+                // 1. 计算亮度 (Luminance)
+                // 使用标准的 Rec. 601 亮度系数 (人眼对绿色最敏感，蓝色最不敏感)
+                float luminance = dot(color, float3(0.2126, 0.7152, 0.0722));
+                
+                // 2. 构建灰度颜色
+                float3 gray = float3(luminance, luminance, luminance);
+                
+                // 3. 在 灰度 和 原色 之间插值
+                // saturation = 0 -> 全灰
+                // saturation = 1 -> 原色
+                return lerp(gray, color, saturation);
+            }
             
             
             half4 Frag(Varyings input) : SV_Target
@@ -329,16 +312,6 @@ Shader "RadianceCascades/FinalRender"
                 half3 normal;
                 normal.xy = e;
                 normal.z = sqrt(1.0 - e.x * e.x - e.y * e.y);
-                
-                // 从八面体映射恢复（标准解码算法）
-                // normal = half3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
-                // if (normal.z < 0.0)
-                // {
-                //     // z < 0 的情况，需要翻转
-                //     half2 signE = e >= 0.0 ? 1.0 : -1.0;
-                //     normal.xy = (1.0 - abs(normal.yx)) * signE;
-                // }
-                // normal = normalize(normal);
                 
                 half3 gi = 0;
                 // 四次采样，分别计算法线
@@ -434,8 +407,39 @@ Shader "RadianceCascades/FinalRender"
                 #endif
                 
                 gi *= giCoefficient;
+
+                // AO：
+                // 在SDF 介于 0 ~ 15之间，平滑地计算AO
+                float sdfAO = smoothstep(0, 35, sdf);
+                sdfAO = sdf < 0.15 ? 1 : sdfAO;
+                sdfAO = sdfAO * .5 + .5;
+
+                // 接下来是一个后处理：玩家视野，影响饱和度
+                float2 playerPosWS = _Player_PosWS_Radius_Smoothness_Angle.xy;
+                float2 playerPosPS = posWorld2Pixel(float3(playerPosWS, 0), _RC_Param);
+                float2 playerPosUV = playerPosPS / _RC_Param;
+                float playerRadius = _Player_PosWS_Radius_Smoothness_Angle.z;
+                float playerAngle = _Player_PosWS_Radius_Smoothness_Angle.w;
+
+                float2 playerDir = normalize(playerPosPS - posPS);
+
+                float distancePS = length(posPS - playerPosPS);
+                float playerSampleSDF = SampleSDF(uv, playerDir, float2(0, distancePS)).w;
+
+                // 看不见的地方 gi 大幅减少
+                gi *= playerSampleSDF * .85 + .15f;
+                
                 // 应用GI系数
                 ans.xyz = albedo * (gi + .05f);
+
+                // 看不见的地方调整饱和度，直接调成接近灰色
+                float3 playerColor = AdjustSaturation(ans.xyz, playerSampleSDF * .85f + .15f);
+                // 看不见的地方调低亮度
+                playerColor *= playerSampleSDF * .5f + .5f;
+                
+                ans.xyz = playerColor;
+
+                ans.xyz *= sdfAO;
 
                 // 以下是debug内容
                 
@@ -470,6 +474,9 @@ Shader "RadianceCascades/FinalRender"
                 //ans.xyz = normal.xyz;
 
                 //ans = float4(posWS.xy, 0, 1);
+                //ans = float4(_Player_PosWS_Radius_Smoothness_Angle.xy, 0, 1);
+
+                //ans = playerSampleSDF;
                 
                 return ans;
             }

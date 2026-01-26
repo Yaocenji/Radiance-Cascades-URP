@@ -317,23 +317,9 @@ Shader "RadianceCascades/RC_Object"
 
             // ---------------------------------------------------------
             // 法线映射：将3D法线压缩到2D (RG通道)
-            // 使用八面体映射 (Octahedral Mapping)
             // ---------------------------------------------------------
             half2 EncodeNormalOctahedron(half3 n)
             {
-                // // 将法线映射到八面体，然后展开到平面
-                // n /= (abs(n.x) + abs(n.y) + abs(n.z));
-                // half2 result;
-                // if (n.z >= 0.0)
-                // {
-                //     result = n.xy;
-                // }
-                // else
-                // {
-                //     result = (1.0 - abs(n.yx)) * (n.xy >= 0.0 ? 1.0 : -1.0);
-                // }
-                // // 映射到 [0, 1] 范围
-                // return result * 0.5 + 0.5;
                 return normalize(n).xy * 0.5 + 0.5;
             }
 
@@ -361,6 +347,203 @@ Shader "RadianceCascades/RC_Object"
                 // RG通道存储编码后的法线，B通道存储GI系数，A通道保留
                 // GI系数用 / 10 打包到[0, 1]，这意味着GI系数范围是0.1到10.0
                 return half4(encodedNormal /** (occlusion > 0.001 ? 1 : 0.0001)*/, _GICoefficient / 10.0, 1.0);
+            }
+            ENDHLSL
+        }
+
+        // =================================================================================
+        // Pass 4: RC_GBuffers (Multiple Render Targets)
+        // 作用：整合所有 GBuffer 数据，通过 MRT 输出到三张纹理
+        // Target 0: Albedo (RGB) + Alpha (A)
+        // Target 1: LightOcc (RGB: Emission + History, A: Occlusion)
+        // Target 2: NormSpec (RG: Encoded Normal, B: GI Coefficient, A: Reserved)
+        // =================================================================================
+        Pass
+        {
+            Name "RC_GBuffers"
+            Tags { "Queue" = "Transparent" "LightMode"="RC_GBuffers" }
+
+            Blend One Zero
+            Cull Off
+            ZWrite Off
+
+            HLSLPROGRAM
+            #pragma vertex Vert
+            #pragma fragment Frag
+            
+            // Interior Lighting 变体编译（互斥：体光照或偷光法）
+            #pragma multi_compile RC_USE_VOLUMETRIC_LIGHTING RC_USE_TRICK_LIGHT
+            
+            // 引入 URP 核心库
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+            // ---------------------------------------------------------
+            // 1. CBUFFER 定义 (整合所有 Pass 需要的参数)
+            // ---------------------------------------------------------
+            CBUFFER_START(UnityPerMaterial)
+                float4 _MainTex_ST;
+                float4 _BumpMap_ST;
+                half4 _EmissionColor;
+                half _IsWall;
+                half _Occlusion;
+                half _GICoefficient;
+                float2 _RotationSinCos; // x=cos, y=sin
+                float4 _RC_History_Param;
+                float4 _RC_Param;
+                float4x4 _RC_PrevViewProjMatrix;
+                float4x4 _RC_CurrViewProjMatrix;
+                float _RC_BounceIntensity;
+            CBUFFER_END
+
+            // ---------------------------------------------------------
+            // 2. 纹理定义
+            // ---------------------------------------------------------
+            TEXTURE2D(_MainTex);        SAMPLER(sampler_MainTex);
+            TEXTURE2D(_BumpMap);        SAMPLER(sampler_BumpMap);
+            TEXTURE2D(_RC_HistoryTexture);   SAMPLER(sampler_PointClamp);
+
+            // ---------------------------------------------------------
+            // 3. 输入/输出 结构体 (整合所有 Pass 需要的字段)
+            // ---------------------------------------------------------
+            struct Attributes
+            {
+                float4 positionOS : POSITION;
+                float2 uv         : TEXCOORD0;
+                float3 normalOS   : NORMAL;
+                float4 tangentOS  : TANGENT;
+                float4 color      : COLOR;
+            };
+
+            struct Varyings
+            {
+                float4 positionCS : SV_POSITION;
+                float2 uv         : TEXCOORD0;
+                float4 color      : TEXCOORD1;      // 来自 Universal2D
+                float3 positionWS : TEXCOORD2;      // 来自 RC_GBuffer_LightOcc
+                half3 normalWS    : TEXCOORD3;      // 来自 GBuffer_NormSpec
+                half3 tangentWS   : TEXCOORD4;      // 来自 GBuffer_NormSpec
+                half3 bitangentWS : TEXCOORD5;      // 来自 GBuffer_NormSpec
+            };
+
+            // ---------------------------------------------------------
+            // 4. 顶点着色器 (整合所有 Pass 的顶点逻辑)
+            // ---------------------------------------------------------
+            Varyings Vert(Attributes IN)
+            {
+                Varyings OUT = (Varyings)0;
+                
+                // 顶点变换 (所有 Pass 共用)
+                VertexPositionInputs vertexInput = GetVertexPositionInputs(IN.positionOS.xyz);
+                OUT.positionCS = vertexInput.positionCS;
+                OUT.uv = TRANSFORM_TEX(IN.uv, _MainTex);
+                
+                // Universal2D 需要的字段
+                OUT.color = IN.color;
+                
+                // RC_GBuffer_LightOcc 需要的字段
+                OUT.positionWS = vertexInput.positionWS;
+                
+                // GBuffer_NormSpec 需要的字段 - 手动构建 TBN
+                float cosA = _RotationSinCos.x;
+                float sinA = _RotationSinCos.y;
+                // [ cos  -sin ]
+                // [ sin   cos ]
+                OUT.tangentWS = half3(cosA, sinA, 0);
+                OUT.bitangentWS = half3(-sinA, cosA, 0);
+                OUT.normalWS = half3(0, 0, 1);
+
+                return OUT;
+            }
+
+            // ---------------------------------------------------------
+            // 5. 辅助函数
+            // ---------------------------------------------------------
+            
+            // 计算 Motion Vector (来自 RC_GBuffer_LightOcc)
+            float2 CalculateMotion(float3 worldPos)
+            {
+                // 1. 当前帧裁剪空间坐标 (-1 ~ 1)
+                float4 clipPos = mul(_RC_CurrViewProjMatrix, float4(worldPos, 1.0));
+                
+                // 2. 上一帧裁剪空间坐标
+                float4 prevClipPos = mul(_RC_PrevViewProjMatrix, float4(worldPos, 1.0));
+
+                // 3. 转为 UV (0 ~ 1)
+                float2 uv = (clipPos.xy / clipPos.w) * 0.5 + 0.5;
+                float2 prevUV = (prevClipPos.xy / prevClipPos.w) * 0.5 + 0.5;
+
+                // 4. 差值
+                float2 ans = uv - prevUV;
+                ans.y = -ans.y;
+                return ans;
+            }
+
+            // 法线编码 (来自 GBuffer_NormSpec)
+            half2 EncodeNormalOctahedron(half3 n)
+            {
+                return normalize(n).xy * 0.5 + 0.5;
+            }
+
+            // ---------------------------------------------------------
+            // 6. 片元着色器 (MRT 输出到三个目标)
+            // ---------------------------------------------------------
+            struct FragmentOutput
+            {
+                half4 albedo     : SV_Target0;  // Albedo (RGB) + Alpha (A)
+                half4 lightOcc   : SV_Target1;  // LightOcc (RGB: Emission + History, A: Occlusion)
+                half4 normSpec   : SV_Target2;  // NormSpec (RG: Encoded Normal, B: GI Coefficient, A: Reserved)
+            };
+
+            FragmentOutput Frag(Varyings IN)
+            {
+                FragmentOutput OUT;
+                
+                // 采样基础纹理
+                half4 albedo = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, IN.uv);
+                
+                // 计算基础 occlusion：基于 isWall 和 alpha
+                half baseOcclusion = (abs(_IsWall) * albedo.a) <= .5f ? 0 : 1;
+                clip(albedo.a - .5f);
+                half occlusion = baseOcclusion * _Occlusion;
+
+                // ============================================================
+                // Target 0: Albedo (来自 Universal2D)
+                // ============================================================
+                half3 finalColor = albedo.rgb * IN.color.rgb;
+                OUT.albedo = half4(finalColor, albedo.a);
+
+                // ============================================================
+                // Target 1: LightOcc (来自 RC_GBuffer_LightOcc)
+                // ============================================================
+                half3 emitColorAns = _EmissionColor * IN.color * albedo.a;
+                
+                if (occlusion > 0.001f)
+                {
+                    float2 motionvector = CalculateMotion(IN.positionWS);
+                    float2 screenUV = IN.positionCS.xy / _RC_Param.xy;
+                    screenUV -= motionvector;
+                    half3 historyColor = SAMPLE_TEXTURE2D(_RC_HistoryTexture, sampler_PointClamp, screenUV).rgb;
+                    emitColorAns += historyColor * _RC_BounceIntensity;
+                }
+                
+                OUT.lightOcc = half4(emitColorAns, occlusion);
+
+                // ============================================================
+                // Target 2: NormSpec (来自 GBuffer_NormSpec)
+                // ============================================================
+                half4 packednorm = SAMPLE_TEXTURE2D(_BumpMap, sampler_BumpMap, IN.uv);
+                half3 unpackednorm = UnpackNormal(packednorm);
+                unpackednorm = normalize(unpackednorm);
+                
+                half3 normalWS = mul(half3x3(IN.tangentWS, IN.bitangentWS, IN.normalWS), unpackednorm);
+                
+                // 将法线编码到 RG 通道
+                half2 encodedNormal = EncodeNormalOctahedron(normalWS);
+                
+                // RG 通道存储编码后的法线，B 通道存储 GI 系数，A 通道保留
+                OUT.normSpec = half4(encodedNormal, _GICoefficient / 10.0, 1.0);
+
+                return OUT;
             }
             ENDHLSL
         }
