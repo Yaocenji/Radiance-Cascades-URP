@@ -154,6 +154,7 @@
                             // 密度 * 距离
                             // 体渲染时：应用occ系数（litOcc.w已经包含了per-object的occlusion）
                             float segmentDensity = litOcc.w * realDist;
+                            segmentDensity *= beyoundScreen ? 4.0f : 1.0f;
                             // 这一步的透光率 (Segment Transmittance)
                             // 严谨物理公式是 exp(-segmentDensity)
                             float segmentTransmittance = exp(-segmentDensity); // 1.5 是调节系数，控制不透明感

@@ -35,6 +35,9 @@ Shader "RadianceCascades/RC_Object"
             Blend SrcAlpha OneMinusSrcAlpha, One OneMinusSrcAlpha
             Cull Off
             ZWrite Off
+            
+            // 开启保守光栅化
+            Conservative True 
 
             HLSLPROGRAM
             #pragma vertex Vert

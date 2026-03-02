@@ -49,9 +49,10 @@ Material:
     - _EnableExternalAlpha: 0
     - _Highlight: 0
     - _IsWall: 1
+    - _Occlusion: 1
     m_Colors:
     - _Color: {r: 1, g: 1, b: 1, a: 1}
-    - _EmissionColor: {r: 1, g: 1, b: 1, a: 1}
+    - _EmissionColor: {r: 5.0414867, g: 5.0414867, b: 5.0414867, a: 1}
     - _Flip: {r: 1, g: 1, b: 1, a: 1}
     - _RendererColor: {r: 1, g: 1, b: 1, a: 1}
   m_BuildTextureStacks: []

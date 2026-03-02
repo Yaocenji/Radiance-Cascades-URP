@@ -45,7 +45,8 @@ Shader "RadianceCascades/FinalRender"
             float _RC_TrickLightIntensity;
             float _RC_TrickLightDistance;
 
-            float4 _Player_PosWS_Radius_Smoothness_Angle;    // 玩家的世界空间位置，影响半径，视野角度
+            float4 _Player_PosWS_Direction_Angle;    // 玩家的世界空间位置，影响半径，视野角度
+            float4 _Player_Radius_Eye_Inner_Outter_Blank;    // 玩家的世界方向
             CBUFFER_END
 
             // 定义新采样器用于采样lod
@@ -266,6 +267,120 @@ Shader "RadianceCascades/FinalRender"
             }
 
 
+
+            //计算玩家视野用的独特的Raymarching：无视光源的遮挡
+            float4 SampleSDFPlayerSight(float2 rayOrigin, float2 rayDirection, float2 rayRange)
+            {
+                float t = rayRange.x + .01f;
+                float4 hit = float4(0, 0, 0, 1);
+                float2 texelSize = 1 / _RC_Param;
+                
+                float minSDF = 65535.0f;
+                float minSDFt = 0;
+
+                const int maxMarchingStep = 32;
+                for (int i = 0; i < maxMarchingStep; i++)
+                {
+                    float2 currentPosition = rayOrigin + t * rayDirection * texelSize;
+
+                    if (t > rayRange.y /*|| currentPosition.x < 0 || currentPosition.y < 0 || currentPosition.x > 1 || currentPosition.y > 1*/)
+                    {
+                        break;
+                    }
+                    
+                    // 选择合适的图来采样SDF信息
+                    // 判断是否超出屏幕
+                    bool beyoundScreen = currentPosition.x < 0 || currentPosition.y < 0 || currentPosition.x > 1 || currentPosition.y > 1;
+                    // 采样世界空间的UV坐标
+                    // 目前是硬编码：世界空间=屏幕空间放大四倍 
+                    float2 currentPositionWorld = (currentPosition - .5f) / 4.0f + .5f;
+                    
+                    float sdf = beyoundScreen ? 4.0f * SAMPLE_TEXTURE2D(_SDF_World, sampler_LinearClamp, currentPositionWorld).r : SAMPLE_TEXTURE2D(_SDF, sampler_LinearClamp, currentPosition).r;
+                    if (sdf < minSDF)
+                    {
+                        minSDF = sdf;
+                        minSDFt = t;
+                    }
+                    
+                    // sdf < 0 表示真的撞上了
+                    #if RC_USE_VOLUMETRIC_LIGHTING
+                    // 真实体光照：SDF非正部分步进计算
+                    if (sdf < 0.15)
+                    {
+                        // 判断此处的厚度
+                        float4 litOcc = float4(beyoundScreen ? SAMPLE_TEXTURE2D(_LightSrc_Occlusion_World, sampler_LinearClamp, currentPositionWorld) : SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
+                        
+                        float dist = max(abs(sdf), 1.5);
+                        
+                        if (litOcc.w >= 0.9999)
+                        {
+                            // 撞到坚实物体，直接结束
+                            hit.xyz += hit.w * litOcc.rgb * .5f;
+                            hit.w = 0;
+                            break;
+                        }
+                        else
+                        {
+                            // 进入半透明物体
+                            float realDist = min(max(rayRange.y - t, 3), dist);
+                            float segmentDensity = litOcc.w * realDist;
+                            segmentDensity = beyoundScreen ? 4.0f : 1.0f;
+                            float segmentTransmittance = exp(-segmentDensity);
+
+                            // 3. 累积光照 (Radiance)
+                            // 能量守恒：被阻挡掉的光转化为了发光（假设是自发光体）
+                            // 或者是简单的累加：Emission * 这一段总共的可见度
+                            // 近似：(Emission) * (进入时的透光率 - 离开时的透光率)
+                            // 这表示"这段路程中被截获/发出的光"
+                            float3 segmentLight = litOcc.rgb * (1.0 - segmentTransmittance);
+
+                            hit.rgb += hit.w * segmentLight;
+
+                            // 核心改变之处：如果是光源，取消这里的全局透光率衰减
+                            //if (!(litOcc.r >= 0.001f || litOcc.g >= 0.001f || litOcc.b >= 0.001f))
+                            {
+                                hit.w *= segmentTransmittance;
+                            }
+                            
+                            t += realDist;
+                            
+                        }
+
+                    }
+                    #else
+                    // 不使用体光照：直接跳过SDF非正部分
+                    if (sdf < 0.15)
+                    {
+                        // 撞到物体，直接结束
+                        float4 litOcc = float4(beyoundScreen ? SAMPLE_TEXTURE2D(_LightSrc_Occlusion_World, sampler_LinearClamp, currentPositionWorld) : SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, currentPosition));
+
+                        hit.xyz += hit.w * litOcc.rgb * .5f;
+                        hit.w = 0;
+                        break;
+                    }
+                    #endif
+                    else
+                    {
+                        //  进入空气
+                        // 这里可以往回缩一点，但不要缩过头了
+                        // 规则：如果 distance > 30，那么向后缩3，否则向后缩 distance / 10
+                        t += sdf;
+                        if (sdf > 30)
+                            t -= 1;
+                        else
+                            t -= sdf /30.0f;      
+                    }
+
+                    if (i == maxMarchingStep - 1)
+                    {
+                        hit.w = 0;
+                    }
+                }
+                //if (hit.w >= .001) hit.w *= smoothstep(0, (rayRange.y - minSDFt) * 0.05, max(0, minSDF + 5 ));
+                //hit.x = minPixelDist;
+                return hit;
+            }
+
             // 调整饱和度，输入：颜色，饱和度，输出：调整后的颜色
             float3 AdjustSaturation(float3 color, float saturation = 1.0)
             {
@@ -409,36 +524,71 @@ Shader "RadianceCascades/FinalRender"
                 gi *= giCoefficient;
 
                 // AO：
-                // 在SDF 介于 0 ~ 15之间，平滑地计算AO
-                float sdfAO = smoothstep(0, 35, sdf);
+                // 在SDF 介于 0 ~ 15之间，平滑地计算AO，并应用遮挡系数，遮挡系数越高，AO越大
+                //float nearestEdgeOcc = SAMPLE_TEXTURE2D(_LightSrc_Occlusion, sampler_LinearClamp, nearestEdge).w;
+                float sdfAO = smoothstep(0, 15, sdf);// * nearestEdgeOcc;
                 sdfAO = sdf < 0.15 ? 1 : sdfAO;
                 sdfAO = sdfAO * .5 + .5;
 
-                // 接下来是一个后处理：玩家视野，影响饱和度
-                float2 playerPosWS = _Player_PosWS_Radius_Smoothness_Angle.xy;
+                // 接下来是一个后处理：玩家视野
+                float2 playerPosWS = _Player_PosWS_Direction_Angle.xy;
                 float2 playerPosPS = posWorld2Pixel(float3(playerPosWS, 0), _RC_Param);
                 float2 playerPosUV = playerPosPS / _RC_Param;
-                float playerRadius = _Player_PosWS_Radius_Smoothness_Angle.z;
-                float playerAngle = _Player_PosWS_Radius_Smoothness_Angle.w;
+                float playerDirection = _Player_PosWS_Direction_Angle.z;
+                float playerAngle = _Player_PosWS_Direction_Angle.w;
+                float playerEyeRadius = _Player_Radius_Eye_Inner_Outter_Blank.x;
+                float playerInnerRadius = _Player_Radius_Eye_Inner_Outter_Blank.y;
+                float playerOutterrRadius = _Player_Radius_Eye_Inner_Outter_Blank.z;
 
-                float2 playerDir = normalize(playerPosPS - posPS);
-
+                float2 frag2PlayerDir = normalize(playerPosPS - posPS);
+                float2 player2FragDir = -frag2PlayerDir;
                 float distancePS = length(posPS - playerPosPS);
-                float playerSampleSDF = SampleSDF(uv, playerDir, float2(0, distancePS)).w;
+                float distanceWS = length(posWS - playerPosWS);
+                // 距离系数
+                float dist_dPSbWS = distanceWS != 0 ? distancePS / distanceWS : 1;
+                // 获取像素空间的半径
+                float playerRadiusPS = dist_dPSbWS * playerInnerRadius;
+                // 半径圈：
+                // float2 fragOffsetFromPlayer = playerPosPS + player2FragDir * dist_dPSbWS * playerRadius;
+                
+                // 加入角度
+                float playerFaceRad = radians(playerDirection);
+                float2 playerFaceDir = float2(cos(playerFaceRad), sin(playerFaceRad));
+                float angleDiff = degrees(abs(acos(dot(player2FragDir, playerFaceDir))));
 
-                // 看不见的地方 gi 大幅减少
-                gi *= playerSampleSDF * .85 + .15f;
+                // 如果比半径还近，那么直接可看到
+                float radiusParam = smoothstep(playerInnerRadius + .1f, playerInnerRadius - .1f, distanceWS);
+
+                float playerSDF_SightValue = 0;
+
+                // 这里要减去像素空间的半径
+                if (distancePS > playerRadiusPS) playerSDF_SightValue = SampleSDFPlayerSight(uv, frag2PlayerDir, float2(0, distancePS - playerRadiusPS)).w;
+                else playerSDF_SightValue = 1;
+
+                // 如果在视野角度以内，那么该怎么算怎么算
+                if (angleDiff <= playerAngle)
+                {
+                    // do nothing
+                }
+                // 否则要加入半径系数
+                else
+                {
+                    playerSDF_SightValue *= radiusParam;
+                }
+
+                // 核心后处理
+                // 看不见的地方 gi 减少
+                //gi *= playerSDF_SightValue * .75 + .25;
                 
                 // 应用GI系数
-                ans.xyz = albedo * (gi + .05f);
+                ans.xyz = albedo * (gi + .01f);
 
                 // 看不见的地方调整饱和度，直接调成接近灰色
-                float3 playerColor = AdjustSaturation(ans.xyz, playerSampleSDF * .85f + .15f);
+                float3 playerColor = AdjustSaturation(ans.xyz, playerSDF_SightValue * .95 + .05f);
                 // 看不见的地方调低亮度
-                playerColor *= playerSampleSDF * .5f + .5f;
+                playerColor *= playerSDF_SightValue * .4 + .6;
                 
-                ans.xyz = playerColor;
-
+                //ans.xyz = playerColor;
                 ans.xyz *= sdfAO;
 
                 // 以下是debug内容
@@ -477,6 +627,10 @@ Shader "RadianceCascades/FinalRender"
                 //ans = float4(_Player_PosWS_Radius_Smoothness_Angle.xy, 0, 1);
 
                 //ans = playerSampleSDF;
+
+                //ans = radiusParam;
+
+                //ans = playerSDF_SightValue;
                 
                 return ans;
             }
